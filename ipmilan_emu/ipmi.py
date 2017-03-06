@@ -452,8 +452,6 @@ class RCMPP_RAKP_1(RCMPPLUSPacket):
     def process(self, session):
         response = RCMPP_RAKP_2(self)
         response.remote_session_id = session.remote_session_id
-        response.managed_random = session.managed_random
-        response.managed_guid = session.config.guid
 
         # validate RAKP 1 from remote console
         if self.managed_session_id != session.managed_session_id:
@@ -464,8 +462,10 @@ class RCMPP_RAKP_1(RCMPPLUSPacket):
         session.remote_random = self.remote_random
         session.managed_random = os.urandom(16)
         session.role = self.max_priv # TODO always use max_priv in request
-        response.auth_code = calculate_auth_code(session)
+        response.auth_code = self.calculate_auth_code(session)
 
+        response.managed_random = session.managed_random
+        response.managed_guid = session.config.guid
         response.status_code = 0 # succeed
         return response
 
@@ -561,7 +561,7 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
             response.status_code = 0x0f # invalid integlity check value
             return response
 
-        response.integlity_check_value = calculate_integlity_check_value(session)
+        response.integlity_check_value = self.calculate_integlity_check_value(session)
         response.status_code = 0 # succeed
         return response
 
