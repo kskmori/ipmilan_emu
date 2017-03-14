@@ -14,7 +14,7 @@ def main():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, UDP_PORT))
-    session = Session() # single session only for the present
+    session = Session.getCurrentSession() # single session only for the present
     while True:
         data, addr = sock.recvfrom(bufsize)
         print "DEBUG: recvfrom:", addr

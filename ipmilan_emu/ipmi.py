@@ -5,8 +5,11 @@ import struct
 import binascii
 import hashlib
 import hmac
+from Crypto.Cipher import AES
 import traceback
 import inspect
+
+from session import Session
 
 RMCP_VERSION = 0x06
 RMCP_RESERVED = 0x00
@@ -280,18 +283,40 @@ class IPMI20Packet(IPMIPacket):
             self.packet = packet
         self.auth_type, self.payload_type = struct.unpack('BB', self.packet[:2])
         rest = self.packet[2:]
-        if self.payload_type == IPMI_PAYLOAD_TYPE_OEM:
+        if self.payload_type & 0x3f == IPMI_PAYLOAD_TYPE_OEM:
             self.OEM_IANA, self.OEM_payload_id \
                 = struct.unpack('<IH', rest[:6])
             rest = rest[6:]
         self.session_id, self.seq_no, self.payload_len \
             = struct.unpack('<IIH', rest[:10])
-        
+        payload_data = rest[10:10 + self.payload_len]
         self.dump()
-        self.payload = RCMPPLUSPacket.createRCMPPLUSPacket(self.payload_type)
-        self.payload.unpack(rest[10:])
+
+        session = Session.getCurrentSession() # TODO: proper session management
+        if self.payload_type & 0x80 != 0: # encrypted
+            payload_data = self.decrypt_payload(payload_data, session)
+        if self.payload_type & 0x40 != 0: # authenticated
+            self.session_trailer = rest[10+self.payload_len:]
+
+        self.payload = RCMPPLUSPacket.createRCMPPLUSPacket(self.payload_type & 0x3f)
+        self.payload.unpack(payload_data)
+
+    def decrypt_payload(self, encrypted_payload, session):
+        iv = encrypted_payload[0:16]
+        cipher = AES.new(session.K2[0:16], AES.MODE_CBC, iv)
+        decrypted = cipher.decrypt(encrypted_payload[16:])
+        pad_len = ord(decrypted[-1])
+        return decrypted[:-pad_len-1]
 
     def pack(self):
+        session = Session.getCurrentSession() # TODO: proper session management
+        if len(session.SIK) > 0: # TODO: is_session_active()
+            is_authenticated = True
+            self.payload_type |= 0x40 # authenticated
+            self.payload_type &= 0x7f # TODO: tmp for test
+        else:
+            is_authenticated = False
+
         payload_data = self.payload.pack()
         self.payload_len = len(payload_data)
         self.packet = struct.pack('<BBIIH',
@@ -299,17 +324,36 @@ class IPMI20Packet(IPMIPacket):
                                   self.session_id, self.seq_no,
                                   self.payload_len)
         self.packet += payload_data
+        self.dump()
+
+        session = Session.getCurrentSession() # TODO: proper session management
+        if is_authenticated:
+            # add session trailer to self.packet
+            self.add_session_trailer(session)
+
         return self.packet
-        raise NotImplementedError(self.__class__.__name__ + '.' + inspect.currentframe().f_code.co_name)
+
+    def add_session_trailer(self, session):
+        pad_len = (len(self.packet) + 2) % 4 # +2 for pad len and next header field
+        if pad_len != 0:
+            pad_len = 4 - pad_len
+            self.packet += '\xff' * pad_len
+        self.packet += struct.pack('BB', pad_len, 0x07) # pad len and next header
+        # IPMI_INTE_ALG_HMAC_SHA1_96 is only supported now
+        auth_code = hmac.new(session.K1, self.packet, hashlib.sha1).digest()[:12]
+        self.packet += auth_code
 
     def process(self, session):
-        print "DEBUG: IPMI20Packet.process(): "
         # create RCMP+ Open Session Response packet
         response = IPMI20Packet(self)
+        response.session_id = session.remote_session_id # TODO is this correct?
+        session.remote_seq_no += 1 # TODO init, increment timing
+        response.seq_no = session.remote_seq_no
         response.payload_type = self.payload_type + 1 # response type
         response.payload = self.payload.process(session)
-#        raise NotImplementedError(self.__class__.__name__ + '.' + inspect.currentframe().f_code.co_name)
+
         return response
+
 
 class RCMPPLUSPacket(IPMIPacket):
     """RCMP+ packet factory class"""
@@ -317,6 +361,7 @@ class RCMPPLUSPacket(IPMIPacket):
     @classmethod
     def createRCMPPLUSPacket(cls, payload_type):
         class_table = {
+            0x00: IPMIMessageRequest,
             0x10: RCMPP_OpenSessionRequest,
             0x11: RCMPP_OpenSessionResponse,
             0x12: RCMPP_RAKP_1,
@@ -561,6 +606,7 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
             response.status_code = 0x0f # invalid integlity check value
             return response
 
+        session.generateSessionKeys()
         response.integlity_check_value = self.calculate_integlity_check_value(session)
         response.status_code = 0 # succeed
         return response
@@ -576,21 +622,12 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
         return self.auth_code == value
 
     def calculate_integlity_check_value(self, session):
-        # calclulate SIK
-        text = struct.pack('<16s16sBB',
-                           session.remote_random,
-                           session.managed_random,
-                           session.role,
-                           len(session.config.username))
-        text += session.config.username
-        SIK = hmac.new(session.config.password, text, hashlib.sha1).digest()
-
         # calculate integlity key
         text = struct.pack('<16sI16s',
                            session.remote_random,
                            session.managed_session_id,
                            session.config.guid)
-        return hmac.new(SIK, text, hashlib.sha1).digest()
+        return hmac.new(session.SIK, text, hashlib.sha1).digest()
 
 class RCMPP_RAKP_4(RCMPPLUSPacket):
     """RCMP+ RAKP Message 4 packet structure"""
