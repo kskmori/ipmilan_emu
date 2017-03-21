@@ -285,21 +285,38 @@ class IPMI20Packet(IPMIPacket):
         rest = self.packet[2:]
         if self.payload_type & 0x3f == IPMI_PAYLOAD_TYPE_OEM:
             self.OEM_IANA, self.OEM_payload_id \
-                = struct.unpack('<IH', rest[:6])
-            rest = rest[6:]
+                = struct.unpack('<IH', self.packet[2:8])
+            idx_sid = 8
+        else:
+            idx_sid = 2
         self.session_id, self.seq_no, self.payload_len \
-            = struct.unpack('<IIH', rest[:10])
-        payload_data = rest[10:10 + self.payload_len]
+            = struct.unpack('<IIH', self.packet[idx_sid:idx_sid + 10])
+        payload_data = self.packet[idx_sid + 10:idx_sid + 10 + self.payload_len]
         self.dump()
 
         session = Session.getCurrentSession() # TODO: proper session management
+        if self.payload_type & 0x40 != 0: # autohenticated
+            self.session_trailer = self.packet[idx_sid+10+self.payload_len:]
+            if self.check_integlity(idx_sid + 10 + self.payload_len, session) != True:
+                print "Invalid integlity"
+                # TODO error handling
         if self.payload_type & 0x80 != 0: # encrypted
             payload_data = self.decrypt_payload(payload_data, session)
-        if self.payload_type & 0x40 != 0: # authenticated
-            self.session_trailer = rest[10+self.payload_len:]
 
         self.payload = RCMPPLUSPacket.createRCMPPLUSPacket(self.payload_type & 0x3f)
         self.payload.unpack(payload_data)
+
+    def check_integlity(self, integlity_data_length, session):
+        pad_len = (len(self.packet) + 2) % 4 # +2 for pad len and next header field
+        if pad_len != 0:
+            pad_len = 4 - pad_len
+        # make sure pad len is expected
+        if ord(self.packet[integlity_data_length + pad_len]) != pad_len:
+            # TODO: error handling
+            print "Invalid pad_len"
+            return False
+        auth_code = hmac.new(session.K1, self.packet[0:integlity_data_length + pad_len + 2], hashlib.sha1).digest()[:12]
+        return (auth_code == self.packet[integlity_data_length + pad_len + 2:])
 
     def decrypt_payload(self, encrypted_payload, session):
         iv = encrypted_payload[0:16]
@@ -310,27 +327,34 @@ class IPMI20Packet(IPMIPacket):
 
     def pack(self):
         session = Session.getCurrentSession() # TODO: proper session management
-        if len(session.SIK) > 0: # TODO: is_session_active()
+
+        if self.payload_type & 0x40 != 0 and len(session.SIK) > 0: # authenticated
             is_authenticated = True
-            self.payload_type |= 0x40 # authenticated
-            self.payload_type &= 0x7f # TODO: tmp for test
         else:
             is_authenticated = False
+            self.payload_type &= ~0x40
+        if self.payload_type & 0x80 != 0 and len(session.SIK) > 0: # encrypted
+            is_encrypted = True
+        else:
+            is_encrypted = False
+            self.payload_type &= ~0x80
 
         payload_data = self.payload.pack()
+        if is_encrypted:
+            payload_data = self.encrypt_payload(payload_data, session)
         self.payload_len = len(payload_data)
+
         self.packet = struct.pack('<BBIIH',
                                   self.auth_type, self.payload_type,
                                   self.session_id, self.seq_no,
                                   self.payload_len)
         self.packet += payload_data
-        self.dump()
 
-        session = Session.getCurrentSession() # TODO: proper session management
         if is_authenticated:
             # add session trailer to self.packet
             self.add_session_trailer(session)
 
+        self.dump()
         return self.packet
 
     def add_session_trailer(self, session):
@@ -342,6 +366,16 @@ class IPMI20Packet(IPMIPacket):
         # IPMI_INTE_ALG_HMAC_SHA1_96 is only supported now
         auth_code = hmac.new(session.K1, self.packet, hashlib.sha1).digest()[:12]
         self.packet += auth_code
+
+    def encrypt_payload(self, unencrypted, session):
+        pad_len = (len(unencrypted) + 1) % 16 # assumes AES-CBC-128
+        if pad_len != 0:
+            pad_len = 16 - pad_len
+            unencrypted += b''.join(map(chr, range(1, pad_len + 1)))
+        unencrypted += struct.pack('B', pad_len)
+        iv = os.urandom(16)
+        cipher = AES.new(session.K2[0:16], AES.MODE_CBC, iv)
+        return iv + cipher.encrypt(unencrypted)
 
     def process(self, session):
         # create RCMP+ Open Session Response packet
