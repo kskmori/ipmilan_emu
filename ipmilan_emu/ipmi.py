@@ -386,8 +386,8 @@ class IPMI20Packet(IPMIPacket):
         response.session_id = session.remote_session_id # TODO is this correct?
         session.remote_seq_no += 1 # TODO init, increment timing
         response.seq_no = session.remote_seq_no
-        response.payload_type = self.payload_type + 1 # response type
         response.payload = self.payload.process(session)
+        response.payload_type = response.payload.PAYLOAD_TYPE
 
         return response
 
@@ -411,6 +411,8 @@ class RCMPPLUSPacket(IPMIPacket):
 
 class RCMPP_OpenSessionRequest(RCMPPLUSPacket):
     """RCMP+ Open Session Request packet structure"""
+
+    PAYLOAD_TYPE = 0x10
 
     def __init__(self):
         self.packet = ''
@@ -455,6 +457,8 @@ class RCMPP_OpenSessionRequest(RCMPPLUSPacket):
 
 class RCMPP_OpenSessionResponse(RCMPPLUSPacket):
     """RCMP+ Open Session Response packet structure"""
+
+    PAYLOAD_TYPE = 0x11
 
     def __init__(self, request = None):
         self.packet = ''
@@ -505,6 +509,8 @@ class RCMPP_OpenSessionResponse(RCMPPLUSPacket):
 
 class RCMPP_RAKP_1(RCMPPLUSPacket):
     """RCMP+ RAKP Message 1 packet structure"""
+
+    PAYLOAD_TYPE = 0x12
 
     def __init__(self):
         self.packet = ''
@@ -572,6 +578,8 @@ class RCMPP_RAKP_1(RCMPPLUSPacket):
 class RCMPP_RAKP_2(RCMPPLUSPacket):
     """RCMP+ RAKP Message 2 packet structure"""
 
+    PAYLOAD_TYPE = 0x13
+
     def __init__(self, request = None):
         self.packet = b''
         self.tag = 0
@@ -606,6 +614,8 @@ class RCMPP_RAKP_2(RCMPPLUSPacket):
 
 class RCMPP_RAKP_3(RCMPPLUSPacket):
     """RCMP+ RAKP Message 3 packet structure"""
+
+    PAYLOAD_TYPE = 0x14
 
     def __init__(self):
         self.packet = b''
@@ -676,6 +686,8 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
 class RCMPP_RAKP_4(RCMPPLUSPacket):
     """RCMP+ RAKP Message 4 packet structure"""
 
+    PAYLOAD_TYPE = 0x15
+
     def __init__(self, request = None):
         self.packet = b''
         self.tag = 0
@@ -714,6 +726,8 @@ def ipmi_checksum(data):
 
 class IPMIMessageRequest:
     """IPMI LAN Message Request structure """
+
+    PAYLOAD_TYPE = 0x00
 
     def __init__(self):
         self.packet = ""
@@ -780,7 +794,7 @@ class IPMIMessageRequest:
         except KeyError:
             Logger.error("Not implemented yet: IPMIMessageRequest(0x%02x, 0x%02x)" \
                              % (self.netFn, self.cmd))
-            response.completion_code = 0xd5 # command or parameter not supported
+            response.completion_code = 0xc1 # unrecognized command
             return response
 
         cmd_func(response)
@@ -861,6 +875,8 @@ class IPMIMessageRequest:
 
 class IPMIMessageResponse:
     """IPMI LAN Message Response structure """
+
+    PAYLOAD_TYPE = 0x00
 
     def __init__(self, request = None):
         self.packet = ""
