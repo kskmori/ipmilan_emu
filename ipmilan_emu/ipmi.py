@@ -10,6 +10,8 @@ import traceback
 import inspect
 
 from session import Session
+from logger import Logger
+
 
 RMCP_VERSION = 0x06
 RMCP_RESERVED = 0x00
@@ -53,6 +55,10 @@ IPMI_CONF_ALG_AES_CBC_128 = 0x01
 IPMI_CONF_ALG_xRC4_128    = 0x02
 IPMI_CONF_ALG_xRC4_40     = 0x03
 
+# log prefix for packet dump
+DUMP_INBOUND = '<<< '
+DUMP_OUTBOUND = '>>> '
+
 
 class RMCPPacket:
     """RMCP packet structure """
@@ -70,8 +76,8 @@ class RMCPPacket:
             # payload needs to be set in the processing
 
     def dump(self):
-        print "RMCPPacket.dump(): version=0x%02x, seq_no=0x%02x, rmcp_class=0x%02x" \
-            % (self.version, self.seq_no, self.rmcp_class)
+        Logger.debug("RMCPPacket.dump(): version=0x%02x, seq_no=0x%02x, rmcp_class=0x%02x" \
+                         % (self.version, self.seq_no, self.rmcp_class))
 
     def unpack(self, packet):
         self.packet = packet
@@ -123,10 +129,9 @@ class ASFPacket:
         self.packet = packet
         self.IANA_num, self.type, self.tag, reserved, self.length = \
             struct.unpack('!IBBBB', self.packet)
-        print "DEBUG: ASFPacket unpack: %x %x %x %x %x" % (self.IANA_num, self.type, self.tag, reserved, self.length)
+        Logger.debug("ASFPacket unpack: %x %x %x %x %x" % (self.IANA_num, self.type, self.tag, reserved, self.length))
 
     def pack(self):
-        #print "DEBUG: ASFPacket.pack(): "
         if self.type == ASF_MSG_TYPE_PING:
             raise Exception("ASFPacket.pack(): not implementedtype = " + "ASF_MSG_TYPE_PING")
         elif self.type == ASF_MSG_TYPE_PONG:
@@ -149,16 +154,15 @@ class ASFPacket:
         return self.packet
 
     def process(self, session):
-        print "DEBUG: ASFPacket.process(): "
         response = None
         if self.type == ASF_MSG_TYPE_PING:
-            print "ASF Ping"
+            Logger.debug("ASF Ping")
             # Reply ASF Pong packet
             response = ASFPacket()
             response.type = ASF_MSG_TYPE_PONG
             response.tag = self.tag
         elif self.type == ASF_MSG_TYPE_PONG:
-            print "ASF Pong"
+            Logger.debug("ASF Pong")
             # do nothing
         else:
             raise Exception("Not implemented: ASF type = ", self.type)
@@ -203,8 +207,8 @@ class IPMI15Packet(IPMIPacket):
             # payload_len will be calculated in pack
 
     def dump(self):
-        print "IPMI15Packet: auth_type = 0x%02x, seq_no=0x%04x, session_id=0x%04x" \
-            % (self.auth_type, self.seq_no, self.session_id)
+        Logger.debug("IPMI15Packet: auth_type = 0x%02x, seq_no=0x%04x, session_id=0x%04x" \
+            % (self.auth_type, self.seq_no, self.session_id))
 
     def unpack(self, packet = ''):
         if packet: 
@@ -223,7 +227,6 @@ class IPMI15Packet(IPMIPacket):
         self.payload.unpack(payload_data)
 
     def pack(self):
-        #print "DEBUG: IPMI15Packet.pack(): "
         payload_data = self.payload.pack()
         self.payload_len = len(payload_data)
 
@@ -235,10 +238,9 @@ class IPMI15Packet(IPMIPacket):
         return self.packet
 
     def process(self, session):
-        #print "DEBUG: IPMI15Packet.process(): "
         response = IPMI15Packet(self)
         response.payload = self.payload.process(session)
-        print "TODO: IPMI15Packet.process(): build response packet"
+        Logger.warning("TODO: IPMI15Packet.process(): build response packet")
 
         return response
 
@@ -271,10 +273,11 @@ class IPMI20Packet(IPMIPacket):
             # payload_type and payload need to be set in processing
         
 
-    def dump(self):
-        print "IPMI20Packet: auth_type=0x%02x, payload_type=0x%02x, OEM_IANA=0x%08x, OEM_payload_id=0x%04x, session_id=0x%08x, seq_no=0x%08x, payload_len=0x%04x" \
-            % (self.auth_type, self.payload_type, self.OEM_IANA, self.OEM_payload_id,
-               self.session_id, self.seq_no, self.payload_len)
+    def dump(self, prefix=''):
+        Logger.debug("%sIPMI20Packet: auth_type=0x%02x, payload_type=0x%02x, OEM_IANA=0x%08x, OEM_payload_id=0x%04x, session_id=0x%08x, seq_no=0x%08x, payload_len=0x%04x" 
+                     % (prefix, self.auth_type, self.payload_type,
+                        self.OEM_IANA, self.OEM_payload_id,
+                        self.session_id, self.seq_no, self.payload_len))
 
     def unpack(self, packet = ''):
         # Note: byte order in IPMI messages is LSB first, not Network byte order
@@ -292,13 +295,13 @@ class IPMI20Packet(IPMIPacket):
         self.session_id, self.seq_no, self.payload_len \
             = struct.unpack('<IIH', self.packet[idx_sid:idx_sid + 10])
         payload_data = self.packet[idx_sid + 10:idx_sid + 10 + self.payload_len]
-        self.dump()
+        self.dump(DUMP_INBOUND)
 
         session = Session.getCurrentSession() # TODO: proper session management
         if self.payload_type & 0x40 != 0: # autohenticated
             self.session_trailer = self.packet[idx_sid+10+self.payload_len:]
             if self.check_integlity(idx_sid + 10 + self.payload_len, session) != True:
-                print "Invalid integlity"
+                Logger.error("Invalid integlity")
                 # TODO error handling
         if self.payload_type & 0x80 != 0: # encrypted
             payload_data = self.decrypt_payload(payload_data, session)
@@ -313,7 +316,7 @@ class IPMI20Packet(IPMIPacket):
         # make sure pad len is expected
         if ord(self.packet[integlity_data_length + pad_len]) != pad_len:
             # TODO: error handling
-            print "Invalid pad_len"
+            Logger.error("Invalid pad_len")
             return False
         auth_code = hmac.new(session.K1, self.packet[0:integlity_data_length + pad_len + 2], hashlib.sha1).digest()[:12]
         return (auth_code == self.packet[integlity_data_length + pad_len + 2:])
@@ -354,7 +357,7 @@ class IPMI20Packet(IPMIPacket):
             # add session trailer to self.packet
             self.add_session_trailer(session)
 
-        self.dump()
+        self.dump(DUMP_OUTBOUND)
         return self.packet
 
     def add_session_trailer(self, session):
@@ -418,9 +421,11 @@ class RCMPP_OpenSessionRequest(RCMPPLUSPacket):
         self.inte_alg = 0
         self.conf_alg = 0
 
-    def dump(self):
-        print "RCMPP_OpenSessionRequest: tag=0x%02x, max_priv=0x%04x, session_id=0x%04x, auth_alg=0x%02x, inte_alg=0x%02x, conf_alg=0x%02x" \
-            % (self.tag, self.max_priv, self.session_id, self.auth_alg, self.inte_alg, self.conf_alg)
+    def dump(self, prefix=''):
+        Logger.debug("%sRCMPP_OpenSessionRequest: tag=0x%02x, max_priv=0x%04x, session_id=0x%04x, auth_alg=0x%02x, inte_alg=0x%02x, conf_alg=0x%02x"
+                     % (prefix,
+                        self.tag, self.max_priv, self.session_id,
+                        self.auth_alg, self.inte_alg, self.conf_alg))
 
     def unpack(self, packet):
         self.packet = packet
@@ -432,7 +437,7 @@ class RCMPP_OpenSessionRequest(RCMPPLUSPacket):
         self.inte_alg = ord(self.packet[16+4])
         self.conf_alg = ord(self.packet[24+4])
 
-        self.dump()
+        self.dump(DUMP_INBOUND)
 
     def pack(self):
         raise NotImplementedError(self.__class__.__name__ + '.' + inspect.currentframe().f_code.co_name)
@@ -510,9 +515,12 @@ class RCMPP_RAKP_1(RCMPPLUSPacket):
         self.username_length = 0
         self.username = ''
 
-    def dump(self):
-        print "RCMPP_RAKP_1: tag=0x%02x, managed_session_id=0x%08x, remote_random=0x%s, max_priv=0x%02x, username_length=0x%02x, username=%s" \
-            % (self.tag, self.managed_session_id, binascii.hexlify(self.remote_random), self.max_priv, self.username_length, self.username)
+    def dump(self, prefix=''):
+        Logger.debug("%sRCMPP_RAKP_1: tag=0x%02x, managed_session_id=0x%08x, remote_random=0x%s, max_priv=0x%02x, username_length=0x%02x, username=%s" 
+                     % (prefix,
+                        self.tag, self.managed_session_id,
+                        binascii.hexlify(self.remote_random),
+                        self.max_priv, self.username_length, self.username))
 
     def unpack(self, packet):
         self.packet = packet
@@ -522,7 +530,7 @@ class RCMPP_RAKP_1(RCMPPLUSPacket):
             = struct.unpack('<BBBBI16sBBBB', self.packet[0:28])
         self.username = self.packet[28:28 + self.username_length]
 
-        self.dump()
+        self.dump(DUMP_INBOUND)
 
     def pack(self):
         raise NotImplementedError(self.__class__.__name__ + '.' + inspect.currentframe().f_code.co_name)
@@ -606,9 +614,11 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
         self.managed_session_id = 0
         self.auth_code = b''
 
-    def dump(self):
-        print "RCMPP_RAKP_3: tag=0x%02x, status_code=0x%02x, managed_session_id=0x%08x, auth_code=0x%s..(%d bytes)" \
-            % (self.tag, self.status_code, self.managed_session_id, binascii.hexlify(self.auth_code[0:4]), len(self.auth_code))
+    def dump(self, prefix=''):
+        Logger.debug("%sRCMPP_RAKP_3: tag=0x%02x, status_code=0x%02x, managed_session_id=0x%08x, auth_code=0x%s..(%d bytes)"
+                     % (prefix,
+                        self.tag, self.status_code, self.managed_session_id,
+                        binascii.hexlify(self.auth_code[0:4]), len(self.auth_code)))
 
     def unpack(self, packet):
         self.packet = packet
@@ -617,7 +627,7 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
             self.managed_session_id, = struct.unpack('<I', self.packet[4:8])
             self.auth_code = self.packet[8:]
 
-        self.dump()
+        self.dump(DUMP_INBOUND)
 
     def pack(self):
         raise NotImplementedError(self.__class__.__name__ + '.' + inspect.currentframe().f_code.co_name)
@@ -626,7 +636,7 @@ class RCMPP_RAKP_3(RCMPPLUSPacket):
     def process(self, session):
         if self.status_code != 0:
             # TODO close session
-            print "DEBUG: RAKP_3 closing session with an error: 0x%02x" % (self.status_code)
+            Logger.error("RAKP_3 closing session with an error: 0x%02x" % (self.status_code))
             return None # no response
 
         response = RCMPP_RAKP_4(self)
@@ -718,9 +728,11 @@ class IPMIMessageRequest:
         self.data = ""
         self.checksum_data = 0
 
-    def dump(self):
-        print "IPMIMessageRequest: rsAddr=0x%02x, netFn=0x%02x, rsLUN=0x%02x, rqAddr=0x%02x, rqSeq=0x%02x, rqLUN=0x%02x, cmd=0x%02x" % \
-            (self.rsAddr, self.netFn, self.rsLUN, self.rqAddr, self.rqSeq, self.rqLUN, self.cmd)
+    def dump(self, prefix=''):
+        Logger.debug("%sIPMIMessageRequest: rsAddr=0x%02x, netFn=0x%02x, rsLUN=0x%02x, rqAddr=0x%02x, rqSeq=0x%02x, rqLUN=0x%02x, cmd=0x%02x"
+                     % (prefix,
+                        self.rsAddr, self.netFn, self.rsLUN,
+                        self.rqAddr, self.rqSeq, self.rqLUN, self.cmd))
 
     def unpack(self, packet):
         self.packet = packet
@@ -734,7 +746,7 @@ class IPMIMessageRequest:
         self.data = self.packet[6:-1]
         self.checksum_data = struct.unpack('B', self.packet[-1:])
 
-        self.dump()
+        self.dump(DUMP_INBOUND)
 
         # checksum validate
         if ipmi_checksum(self.packet[0:3]) != 0 or ipmi_checksum(self.packet) != 0:
@@ -745,7 +757,6 @@ class IPMIMessageRequest:
         return self.packet
 
     def process(self, session):
-        #print "DEBUG: IPMIMessageRequest.process(): "
         self.session = session # to pass to cmd_x functions
 
         cmd_table = {
@@ -767,8 +778,8 @@ class IPMIMessageRequest:
         try:
             cmd_func = cmd_table[self.netFn][self.cmd]
         except KeyError:
-            print "DEBUG: Not implemented yet: IPMIMessageRequest(0x%02x, 0x%02x)" \
-                % (self.netFn, self.cmd)
+            Logger.error("Not implemented yet: IPMIMessageRequest(0x%02x, 0x%02x)" \
+                             % (self.netFn, self.cmd))
             response.completion_code = 0xd5 # command or parameter not supported
             return response
 
@@ -777,7 +788,7 @@ class IPMIMessageRequest:
 
     ### IPMIMessageRequest command functions
     def cmd_get_device_id(self, res):
-        print "DEBUG: IPMIMessageRequest.cmd_get_device_id(): "
+        Logger.debug("IPMIMessageRequest.cmd_get_device_id(): ")
         res.data = struct.pack('BBBBBBBBBBB',
                                0x00, # Device ID; unspecified
                                0x01, # Device Revision
@@ -790,7 +801,7 @@ class IPMIMessageRequest:
         res.completion_code = 0x00 # success
 
     def cmd_get_chan_auth_capa(self, res):
-        print "DEBUG: IPMIMessageRequest.cmd_get_chan_auth_capa(): "
+        Logger.debug("IPMIMessageRequest.cmd_get_chan_auth_capa(): ")
         if False: # IPMI v1.5
             res.data = struct.pack('BBBBBBBB',
                                    0, # channel number
@@ -810,7 +821,7 @@ class IPMIMessageRequest:
         res.completion_code = 0x00 # success
 
     def cmd_get_sess_challenge(self, res):
-        print "DEBUG: IPMIMessageRequest.cmd_get_sess_challenge(): "
+        Logger.debug("IPMIMessageRequest.cmd_get_sess_challenge(): ")
         res.data = struct.pack('!I16s',
                                0xffffffff, # tmp session
                                "challenge") # tmp challenge string; TODO: use random
@@ -818,7 +829,7 @@ class IPMIMessageRequest:
 
 
     def cmd_active_sess(self, res):
-        print "DEBUG: IPMIMessageRequest.cmd_active_sess(): "
+        Logger.debug("IPMIMessageRequest.cmd_active_sess(): ")
         res.data = struct.pack('!BIIB',
                                ord(self.data[0]),
                                0xffffffff, # tmp session
@@ -827,13 +838,13 @@ class IPMIMessageRequest:
         res.completion_code = 0x00 # success
 
     def cmd_set_sess_priv_level(self, res):
-        print "DEBUG: IPMIMessageRequest.cmd_set_sess_priv_level(): "
+        Logger.debug("IPMIMessageRequest.cmd_set_sess_priv_level(): ")
         res.data = struct.pack('B',
                                ord(self.data[0])) # privilege level as requested
         res.completion_code = 0x00 # success
 
     def cmd_close_session(self, res):
-        print "DEBUG: IPMIMessageRequest.cmd_close_session(): "
+        Logger.debug("IPMIMessageRequest.cmd_close_session(): ")
         res.completion_code = 0x00 # success
 
     ### Chassis Commands
@@ -876,17 +887,19 @@ class IPMIMessageResponse:
             # completion_code and data needs to be set in the processing of the request
             # checksums will be calculated in pack()
 
-    def dump(self):
-        print "IPMIMessageResponse: rqAddr=0x%02x, netFn=0x%02x, rqLUN=0x%02x, rsAddr=0x%02x, rqSeq=0x%02x, rsLUN=0x%02x, cmd=0x%02x, completion_code=0x%02x" % \
-            (self.rqAddr, self.netFn, self.rqLUN, self.rsAddr, self.rqSeq, self.rsLUN, self.cmd, self.completion_code)
+    def dump(self, prefix=''):
+        Logger.debug("%sIPMIMessageResponse: rqAddr=0x%02x, netFn=0x%02x, rqLUN=0x%02x, rsAddr=0x%02x, rqSeq=0x%02x, rsLUN=0x%02x, cmd=0x%02x, completion_code=0x%02x"
+                     % (prefix,
+                        self.rqAddr, self.netFn, self.rqLUN,
+                        self.rsAddr, self.rqSeq, self.rsLUN, self.cmd,
+                        self.completion_code))
 
     def unpack(self, packet):
         self.packet = packet
         raise NotImplementedError(self.__class__.__name__ + '.' + inspect.currentframe().f_code.co_name)
 
     def pack(self):
-        #print "DEBUG: IPMIMessageResponse.pack(): "
-        self.dump()
+        self.dump(DUMP_OUTBOUND)
         self.packet = struct.pack('BB', self.rqAddr, (self.netFn << 2) + self.rqLUN)
         self.packet += struct.pack('B', ipmi_checksum(self.packet))
         self.packet += struct.pack('BBBB',
@@ -898,6 +911,4 @@ class IPMIMessageResponse:
         return self.packet
 
     def process(self, session):
-        print "DEBUG: IPMIMessageResponse.process(): "
-        reply = None
-        return reply
+        return None
